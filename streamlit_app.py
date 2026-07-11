@@ -1,15 +1,16 @@
 """
-MSG → Distributor Mapper
--------------------------
-Upload a reference workbook (Distributor / Dist_Acc_No / Distributor Email)
-and a batch of .msg files. The app extracts the sender email from each .msg
-and matches it against the reference sheet (exact email match first, then
-domain fallback), producing a downloadable Excel mapping report.
+MSG -> Distributor Mapper (v2)
+--------------------------------
+- Reference workbook is bundled in the repo (data/reference.xlsx) so you
+  don't need to re-upload it every time. You can still override it for a
+  one-off run with a different sheet.
+- .msg files are processed entirely in memory (io.BytesIO). Nothing is
+  written to disk or cache at any point.
+- "Clear All" button wipes the in-memory session state immediately.
 """
 
 import io
 import re
-import tempfile
 from pathlib import Path
 
 import extract_msg
@@ -17,26 +18,33 @@ import openpyxl
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="MSG → Distributor Mapper", layout="wide")
+st.set_page_config(page_title="MSG -> Distributor Mapper", layout="wide")
 
 EMAIL_RE = re.compile(r"[\w\.\-\+]+@[\w\-]+\.[\w\.\-]+")
+BUNDLED_REFERENCE_PATH = Path(__file__).parent / "data" / "reference.xlsx"
 
 
 # ----------------------------- helpers -----------------------------------
 
-def extract_sender_email(msg_path: str) -> tuple[str, str]:
-    """Return (display_sender, clean_email) from a .msg file."""
-    msg = extract_msg.Message(msg_path)
+def extract_sender_email(file_bytes: bytes) -> tuple[str, str, str, str]:
+    """Return (display_sender, clean_email, subject, attachments) from
+    in-memory .msg bytes. Nothing touches disk."""
+    bio = io.BytesIO(file_bytes)
+    msg = extract_msg.Message(bio)
     raw_sender = msg.sender or ""
     match = EMAIL_RE.search(raw_sender)
     clean_email = match.group(0).lower().strip() if match else ""
-    return raw_sender, clean_email
+    subject = msg.subject or ""
+    attachments = ", ".join(a.longFilename for a in msg.attachments if a.longFilename)
+    msg.close()
+    return raw_sender, clean_email, subject, attachments
 
 
-def load_reference(file) -> pd.DataFrame:
+@st.cache_data(show_spinner=False)
+def load_reference(file_bytes: bytes) -> pd.DataFrame:
     """Load every sheet of the reference workbook, normalize columns,
     and explode multi-email cells into one row per email."""
-    wb = openpyxl.load_workbook(file, data_only=True)
+    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
     frames = []
 
     for ws in wb.worksheets:
@@ -46,14 +54,13 @@ def load_reference(file) -> pd.DataFrame:
         headers = [str(h).strip() if h else "" for h in rows[0]]
         df = pd.DataFrame(rows[1:], columns=headers)
 
-        # find the relevant columns by fuzzy name match
         dist_col = next((c for c in df.columns if c.lower().startswith("distributor") and "email" not in c.lower()), None)
         email_col = next((c for c in df.columns if "email" in c.lower()), None)
         acc_col = next((c for c in df.columns if "dist_acc" in c.lower() or c.lower() == "account"), None)
         region_col = next((c for c in df.columns if c.lower() == "region"), None)
 
         if not dist_col or not email_col:
-            continue  # sheet doesn't look like a distributor sheet, skip
+            continue
 
         keep = df[[dist_col, email_col]].copy()
         keep.columns = ["Distributor", "Distributor Email"]
@@ -67,8 +74,6 @@ def load_reference(file) -> pd.DataFrame:
 
     ref = pd.concat(frames, ignore_index=True)
     ref = ref.dropna(subset=["Distributor Email"])
-
-    # explode comma-separated email lists into one row per email
     ref["Distributor Email"] = ref["Distributor Email"].astype(str)
     ref = ref.assign(**{"Distributor Email": ref["Distributor Email"].str.split(",")}).explode("Distributor Email")
     ref["Distributor Email"] = ref["Distributor Email"].str.strip().str.lower()
@@ -79,105 +84,131 @@ def load_reference(file) -> pd.DataFrame:
 
 
 def match_sender(sender_email: str, ref: pd.DataFrame) -> dict:
-    """Exact email match first, then domain fallback."""
     if not sender_email:
         return {"Distributor": "", "Dist_Acc_No": "", "Region": "", "Match Type": "No sender email found"}
 
     exact = ref[ref["Distributor Email"] == sender_email]
     if not exact.empty:
         row = exact.iloc[0]
-        return {
-            "Distributor": row["Distributor"],
-            "Dist_Acc_No": row["Dist_Acc_No"],
-            "Region": row["Region"],
-            "Match Type": "Exact email match",
-        }
+        return {"Distributor": row["Distributor"], "Dist_Acc_No": row["Dist_Acc_No"], "Region": row["Region"], "Match Type": "Exact email match"}
 
     domain = sender_email.split("@")[-1]
     dom_match = ref[ref["Domain"] == domain]
     if not dom_match.empty:
         row = dom_match.iloc[0]
-        return {
-            "Distributor": row["Distributor"],
-            "Dist_Acc_No": row["Dist_Acc_No"],
-            "Region": row["Region"],
-            "Match Type": "Domain match",
-        }
+        return {"Distributor": row["Distributor"], "Dist_Acc_No": row["Dist_Acc_No"], "Region": row["Region"], "Match Type": "Domain match"}
 
     return {"Distributor": "", "Dist_Acc_No": "", "Region": "", "Match Type": "Unmatched"}
 
 
+# --------------------------- session state ---------------------------------
+
+if "results" not in st.session_state:
+    st.session_state.results = None
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
+
+
+def clear_all():
+    st.session_state.results = None
+    st.session_state.uploader_key += 1  # forces file_uploader widgets to reset
+
+
 # ------------------------------- UI ---------------------------------------
 
-st.title("📧 MSG → Distributor Mapper")
-st.caption("Match incoming .msg files to a distributor using the reference sheet's sender emails.")
+st.title("MSG -> Distributor Mapper")
+st.caption("Reference sheet is preloaded from the repo. Upload .msg files to match senders to distributors. "
+           "Nothing is written to disk or cache — everything stays in memory for this session only.")
 
-col1, col2 = st.columns(2)
-with col1:
-    ref_file = st.file_uploader("Reference workbook (Distributor / Dist_Acc_No / Distributor Email)", type=["xlsx"])
-with col2:
-    msg_files = st.file_uploader("MSG files (multiple allowed)", type=["msg"], accept_multiple_files=True)
+top_l, top_r = st.columns([4, 1])
+with top_r:
+    st.button("Clear All", on_click=clear_all, use_container_width=True, type="secondary")
 
-if ref_file and msg_files:
-    ref_df = load_reference(ref_file)
+with st.expander("Reference sheet options (using bundled sheet by default)"):
+    override_ref = st.file_uploader(
+        "Override with a different reference workbook for this session only",
+        type=["xlsx"], key=f"ref_override_{st.session_state.uploader_key}",
+    )
+
+if override_ref is not None:
+    ref_bytes = override_ref.getvalue()
+    ref_source_label = f"Uploaded override: {override_ref.name}"
+elif BUNDLED_REFERENCE_PATH.exists():
+    ref_bytes = BUNDLED_REFERENCE_PATH.read_bytes()
+    ref_source_label = "Bundled reference sheet (data/reference.xlsx)"
+else:
+    ref_bytes = None
+    ref_source_label = None
+
+msg_files = st.file_uploader(
+    "MSG files (multiple allowed)", type=["msg"], accept_multiple_files=True,
+    key=f"msg_uploader_{st.session_state.uploader_key}",
+)
+
+if ref_bytes is None:
+    st.error("No reference sheet found. Add one at data/reference.xlsx in the repo, or upload an override above.")
+elif msg_files:
+    ref_df = load_reference(ref_bytes)
+    st.caption(f"Using: {ref_source_label} - {len(ref_df)} distributor-email rows loaded.")
 
     if ref_df.empty:
-        st.error("Couldn't find a sheet with Distributor + Distributor Email columns. Check the reference file.")
+        st.error("Couldn't find a sheet with Distributor + Distributor Email columns in the reference workbook.")
     else:
-        st.success(f"Loaded {len(ref_df)} distributor-email rows from reference sheet.")
-
         results = []
-        with st.spinner("Processing .msg files..."):
+        with st.spinner("Processing .msg files (in memory, nothing saved to disk)..."):
             for uploaded in msg_files:
-                with tempfile.NamedTemporaryFile(suffix=".msg", delete=False) as tmp:
-                    tmp.write(uploaded.getbuffer())
-                    tmp_path = tmp.name
-
-                raw_sender, sender_email = extract_sender_email(tmp_path)
+                file_bytes = uploaded.getvalue()  # stays in RAM only
+                raw_sender, sender_email, subject, attachments = extract_sender_email(file_bytes)
                 match = match_sender(sender_email, ref_df)
-
-                # also try to get attachment names + subject for context
-                msg = extract_msg.Message(tmp_path)
-                attachments = ", ".join(a.longFilename for a in msg.attachments if a.longFilename)
 
                 results.append({
                     "MSG File": uploaded.name,
-                    "Subject": msg.subject or "",
+                    "Subject": subject,
                     "Sender": raw_sender,
                     "Sender Email": sender_email,
                     "Attachments": attachments,
                     **match,
                 })
-                Path(tmp_path).unlink(missing_ok=True)
 
-        result_df = pd.DataFrame(results)
+        st.session_state.results = pd.DataFrame(results)
 
-        # badge-style summary
-        matched = (result_df["Match Type"] != "Unmatched").sum()
-        total = len(result_df)
-        st.markdown(f"**Matched:** {matched} / {total}")
+if st.session_state.results is not None:
+    result_df = st.session_state.results
+    matched_df = result_df[result_df["Match Type"].isin(["Exact email match", "Domain match"])]
+    unmatched_df = result_df[~result_df["Match Type"].isin(["Exact email match", "Domain match"])]
 
-        def highlight_match(row):
-            if row["Match Type"] == "Unmatched" or row["Match Type"] == "No sender email found":
-                return ["background-color: #ffe0e0"] * len(row)
-            elif row["Match Type"] == "Domain match":
-                return ["background-color: #fff6d6"] * len(row)
-            else:
-                return ["background-color: #e2f7e2"] * len(row)
+    matched, total = len(matched_df), len(result_df)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Total files", total)
+    c2.metric("Matched", matched)
+    c3.metric("Unmatched", total - matched)
 
-        st.dataframe(result_df.style.apply(highlight_match, axis=1), use_container_width=True)
-
-        # download as Excel
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            result_df.to_excel(writer, index=False, sheet_name="Mapping")
-        output.seek(0)
-
-        st.download_button(
-            "⬇️ Download mapping as Excel",
-            data=output,
-            file_name="msg_distributor_mapping.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    st.subheader("Matched senders")
+    if not matched_df.empty:
+        st.dataframe(
+            matched_df[["MSG File", "Sender Email", "Distributor", "Dist_Acc_No", "Region", "Match Type", "Subject", "Attachments"]],
+            use_container_width=True, hide_index=True,
         )
+    else:
+        st.info("No files matched a distributor yet.")
+
+    if not unmatched_df.empty:
+        st.subheader("Unmatched senders")
+        st.dataframe(
+            unmatched_df[["MSG File", "Sender Email", "Match Type", "Subject"]],
+            use_container_width=True, hide_index=True,
+        )
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        result_df.to_excel(writer, index=False, sheet_name="Mapping")
+    output.seek(0)
+
+    st.download_button(
+        "Download mapping as Excel",
+        data=output,
+        file_name="msg_distributor_mapping.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 else:
-    st.info("Upload the reference workbook and at least one .msg file to begin.")
+    st.info("Upload .msg files to see match results.")
