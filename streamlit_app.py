@@ -136,19 +136,59 @@ def get_candidates(sender_email: str, ref: pd.DataFrame) -> list[dict]:
 
 # ----------------------------- sheet reading -----------------------------
 
-def read_all_sheets(filename: str, file_bytes: bytes) -> dict[str, pd.DataFrame] | None:
+def _detect_header_row(raw: pd.DataFrame, scan_rows: int = 15) -> int:
+    """Pick the most likely header row within the first `scan_rows` rows.
+    A real header row is mostly filled AND made of actual text labels
+    (e.g. 'Location', 'Report Date') rather than short numeric/flag values
+    (e.g. a '1,2,3...' index row, or a 'Y/N' row) - those can be just as
+    full as the real header, so fullness alone isn't enough."""
+    total_cols = raw.shape[1] or 1
+    for i in range(min(scan_rows, len(raw))):
+        row = raw.iloc[i]
+        non_null = row.notna()
+        fill_ratio = non_null.sum() / total_cols
+        if fill_ratio < 0.5:
+            continue
+        values = [str(v) for v in row[non_null]]
+        avg_len = sum(len(v) for v in values) / len(values) if values else 0
+        if avg_len >= 4:
+            return i
+
+    # fallback: most-filled row in the scan window
+    best_idx, best_count = 0, -1
+    for i in range(min(scan_rows, len(raw))):
+        count = raw.iloc[i].notna().sum()
+        if count > best_count:
+            best_idx, best_count = i, count
+    return best_idx
+
+
+def read_all_sheets_raw(filename: str, file_bytes: bytes) -> dict[str, pd.DataFrame] | None:
+    """Read every sheet with no header assumption (header=None), so the
+    caller can detect/choose the real header row."""
     ext = Path(filename).suffix.lower()
     bio = io.BytesIO(file_bytes)
     try:
         if ext == ".csv":
-            return {"Sheet1": pd.read_csv(bio, dtype=str)}
+            return {"Sheet1": pd.read_csv(bio, header=None, dtype=str)}
         elif ext == ".xlsb":
-            return pd.read_excel(bio, sheet_name=None, engine="pyxlsb", dtype=str)
+            return pd.read_excel(bio, sheet_name=None, engine="pyxlsb", header=None, dtype=str)
         elif ext in (".xlsx", ".xls"):
-            return pd.read_excel(bio, sheet_name=None, dtype=str)
+            return pd.read_excel(bio, sheet_name=None, header=None, dtype=str)
     except Exception:
         return None
     return None
+
+
+def apply_header_row(raw: pd.DataFrame, header_row: int) -> pd.DataFrame:
+    """Slice a header=None dataframe into a proper dataframe using the given
+    row index as column headers."""
+    headers = raw.iloc[header_row].tolist()
+    headers = [str(h).strip() if h is not None and str(h).strip() != "" else f"Column {i+1}" for i, h in enumerate(headers)]
+    df = raw.iloc[header_row + 1:].copy()
+    df.columns = headers
+    df = df.reset_index(drop=True)
+    return df
 
 
 # ----------------------------- mapping memory -----------------------------
@@ -292,20 +332,47 @@ if st.session_state.results:
             if st.session_state.expanded_attachment and st.session_state.expanded_attachment[0] == f_idx:
                 _, a_idx = st.session_state.expanded_attachment
                 att_name, att_bytes = attachments[a_idx]
-                sheets = read_all_sheets(att_name, att_bytes)
+                raw_sheets = read_all_sheets_raw(att_name, att_bytes)
 
-                if sheets is None:
+                if raw_sheets is None:
                     st.warning(f"Could not read {att_name} as a spreadsheet.")
                 else:
-                    sheet_names = list(sheets.keys())
+                    sheet_names = list(raw_sheets.keys())
                     tabs = st.tabs(sheet_names)
 
                     for tab, sheet_name in zip(tabs, sheet_names):
                         with tab:
-                            df = sheets[sheet_name]
+                            raw_df = raw_sheets[sheet_name]
+                            detected_row = _detect_header_row(raw_df)
+
+                            hr_key = f"header_row_{f_idx}_{a_idx}_{sheet_name}"
+                            if hr_key not in st.session_state:
+                                st.session_state[hr_key] = detected_row
+
+                            st.caption("Click a row below to use it as the header row (auto-detected row is pre-selected).")
+
+                            preview_rows = min(15, len(raw_df))
+                            preview_df = raw_df.iloc[:preview_rows].copy()
+                            preview_df.columns = [col_letter(i) for i in range(preview_df.shape[1])]
+                            preview_df.index = range(preview_rows)
+
+                            sel_key = f"header_select_{f_idx}_{a_idx}_{sheet_name}"
+                            event = st.dataframe(
+                                preview_df, use_container_width=True, height=280,
+                                on_select="rerun", selection_mode="single-row", key=sel_key,
+                            )
+
+                            selected_rows = event.selection.rows if event and event.selection else []
+                            if selected_rows:
+                                st.session_state[hr_key] = selected_rows[0]
+
+                            header_row = st.session_state[hr_key]
+                            st.write(f"Using row {header_row} as header.")
+
+                            df = apply_header_row(raw_df, int(header_row))
                             display_df = df.copy()
                             display_df.columns = [f"{col_letter(i)}: {c}" for i, c in enumerate(df.columns)]
-                            display_df.index = range(2, 2 + len(display_df))
+                            display_df.index = range(header_row + 2, header_row + 2 + len(display_df))
                             st.dataframe(display_df, use_container_width=True, height=280)
 
                             mkey = mapping_key(selected_distributor, sheet_name)
