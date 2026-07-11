@@ -191,30 +191,31 @@ if st.session_state.results is not None:
 
     for idx, row in result_df.iterrows():
         is_matched = row["Match Type"] in ["Exact email match", "Domain match"]
-        st.markdown(f"**{row['MSG File']}**")
-        st.write(f"Sender email - {row['Sender Email'] or '—'}")
-        st.write(f"Distributor Email - {row['Distributor Email'] if is_matched else '—'}")
-        st.write(f"Match Dist - {row['Distributor'] if is_matched else '—'}")
-        st.write(f"Match Dist Acc No - {row['Dist_Acc_No'] if is_matched else '—'}")
-        if not is_matched:
-            st.caption(f"⚠ {row['Match Type']}")
+        label = f"{row['MSG File']}" + (f" — {row['Distributor']}" if is_matched else " — Unmatched")
 
-        attachments = row["Attachments Data"]
-        if attachments:
-            st.write("Attachments:")
-            cols = st.columns(len(attachments))
-            for i, (att_name, att_bytes) in enumerate(attachments):
-                with cols[i]:
-                    st.download_button(
-                        f"⬇ {att_name}",
-                        data=att_bytes,
-                        file_name=att_name,
-                        mime=guess_mime(att_name),
-                        key=f"att_{idx}_{i}",
-                    )
-        else:
-            st.caption("No attachments found.")
-        st.divider()
+        with st.expander(label):
+            st.write(f"Sender email - {row['Sender Email'] or '—'}")
+            st.write(f"Distributor Email - {row['Distributor Email'] if is_matched else '—'}")
+            st.write(f"Match Dist - {row['Distributor'] if is_matched else '—'}")
+            st.write(f"Match Dist Acc No - {row['Dist_Acc_No'] if is_matched else '—'}")
+            if not is_matched:
+                st.caption(f"⚠ {row['Match Type']}")
+
+            attachments = row["Attachments Data"]
+            if attachments:
+                st.write("Attachments:")
+                cols = st.columns(len(attachments))
+                for i, (att_name, att_bytes) in enumerate(attachments):
+                    with cols[i]:
+                        st.download_button(
+                            f"⬇ {att_name}",
+                            data=att_bytes,
+                            file_name=att_name,
+                            mime=guess_mime(att_name),
+                            key=f"att_{idx}_{i}",
+                        )
+            else:
+                st.caption("No attachments found.")
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
