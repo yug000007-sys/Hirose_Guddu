@@ -184,7 +184,11 @@ def apply_header_row(raw: pd.DataFrame, header_row: int) -> pd.DataFrame:
     """Slice a header=None dataframe into a proper dataframe using the given
     row index as column headers."""
     headers = raw.iloc[header_row].tolist()
-    headers = [str(h).strip() if h is not None and str(h).strip() != "" else f"Column {i+1}" for i, h in enumerate(headers)]
+    headers = [
+        f"Column {i+1}" if (h is None or (isinstance(h, float) and pd.isna(h)) or str(h).strip() == "")
+        else str(h).strip()
+        for i, h in enumerate(headers)
+    ]
     df = raw.iloc[header_row + 1:].copy()
     df.columns = headers
     df = df.reset_index(drop=True)
