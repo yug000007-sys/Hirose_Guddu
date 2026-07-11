@@ -194,10 +194,12 @@ if st.session_state.results is not None:
         label = f"{row['MSG File']}" + (f" — {row['Distributor']}" if is_matched else " — Unmatched")
 
         with st.popover(label, use_container_width=True):
-            st.write(f"Sender email - {row['Sender Email'] or '—'}")
-            st.write(f"Distributor Email - {row['Distributor Email'] if is_matched else '—'}")
-            st.write(f"Match Dist - {row['Distributor'] if is_matched else '—'}")
-            st.write(f"Match Dist Acc No - {row['Dist_Acc_No'] if is_matched else '—'}")
+            st.write(
+                f"Sender email - {row['Sender Email'] or '—'}  |  "
+                f"Distributor Email - {row['Distributor Email'] if is_matched else '—'}  |  "
+                f"Match Dist - {row['Distributor'] if is_matched else '—'}  |  "
+                f"Match Dist Acc No - {row['Dist_Acc_No'] if is_matched else '—'}"
+            )
             if not is_matched:
                 st.caption(f"⚠ {row['Match Type']}")
 
