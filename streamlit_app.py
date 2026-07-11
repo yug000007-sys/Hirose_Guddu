@@ -23,19 +23,32 @@ st.set_page_config(page_title="MSG -> Distributor Mapper", layout="wide")
 EMAIL_RE = re.compile(r"[\w\.\-\+]+@[\w\-]+\.[\w\.\-]+")
 BUNDLED_REFERENCE_PATH = Path(__file__).parent / "data" / "reference.xlsx"
 
+MIME_TYPES = {
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsb": "application/vnd.ms-excel.sheet.binary.macroenabled.12",
+    ".csv": "text/csv",
+}
+
+
+def guess_mime(filename: str) -> str:
+    ext = Path(filename).suffix.lower()
+    return MIME_TYPES.get(ext, "application/octet-stream")
+
 
 # ----------------------------- helpers -----------------------------------
 
-def extract_sender_email(file_bytes: bytes) -> tuple[str, str, str, str]:
+def extract_sender_email(file_bytes: bytes) -> tuple[str, str, str, list[tuple[str, bytes]]]:
     """Return (display_sender, clean_email, subject, attachments) from
-    in-memory .msg bytes. Nothing touches disk."""
+    in-memory .msg bytes. Nothing touches disk. attachments is a list of
+    (filename, file_bytes) tuples."""
     bio = io.BytesIO(file_bytes)
     msg = extract_msg.Message(bio)
     raw_sender = msg.sender or ""
     match = EMAIL_RE.search(raw_sender)
     clean_email = match.group(0).lower().strip() if match else ""
     subject = msg.subject or ""
-    attachments = ", ".join(a.longFilename for a in msg.attachments if a.longFilename)
+    attachments = [(a.longFilename, a.data) for a in msg.attachments if a.longFilename and a.data]
     msg.close()
     return raw_sender, clean_email, subject, attachments
 
@@ -165,7 +178,8 @@ elif msg_files:
                     "Subject": subject,
                     "Sender": raw_sender,
                     "Sender Email": sender_email,
-                    "Attachments": attachments,
+                    "Attachments": ", ".join(name for name, _ in attachments),
+                    "Attachments Data": attachments,
                     **match,
                 })
 
@@ -175,7 +189,7 @@ if st.session_state.results is not None:
     result_df = st.session_state.results
     st.divider()
 
-    for _, row in result_df.iterrows():
+    for idx, row in result_df.iterrows():
         is_matched = row["Match Type"] in ["Exact email match", "Domain match"]
         st.markdown(f"**{row['MSG File']}**")
         st.write(f"Sender email - {row['Sender Email'] or '—'}")
@@ -184,11 +198,27 @@ if st.session_state.results is not None:
         st.write(f"Match Dist Acc No - {row['Dist_Acc_No'] if is_matched else '—'}")
         if not is_matched:
             st.caption(f"⚠ {row['Match Type']}")
+
+        attachments = row["Attachments Data"]
+        if attachments:
+            st.write("Attachments:")
+            cols = st.columns(len(attachments))
+            for i, (att_name, att_bytes) in enumerate(attachments):
+                with cols[i]:
+                    st.download_button(
+                        f"⬇ {att_name}",
+                        data=att_bytes,
+                        file_name=att_name,
+                        mime=guess_mime(att_name),
+                        key=f"att_{idx}_{i}",
+                    )
+        else:
+            st.caption("No attachments found.")
         st.divider()
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        result_df.to_excel(writer, index=False, sheet_name="Mapping")
+        result_df.drop(columns=["Attachments Data"]).to_excel(writer, index=False, sheet_name="Mapping")
     output.seek(0)
 
     st.download_button(
