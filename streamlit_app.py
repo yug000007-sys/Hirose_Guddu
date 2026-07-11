@@ -149,7 +149,6 @@ if ref_bytes is None:
     st.error("No reference sheet found. Add one at data/reference.xlsx in the repo, or upload an override above.")
 elif msg_files:
     ref_df = load_reference(ref_bytes)
-    st.caption(f"Using: {ref_source_label} - {len(ref_df)} distributor-email rows loaded.")
 
     if ref_df.empty:
         st.error("Couldn't find a sheet with Distributor + Distributor Email columns in the reference workbook.")
@@ -174,14 +173,6 @@ elif msg_files:
 
 if st.session_state.results is not None:
     result_df = st.session_state.results
-    matched_df = result_df[result_df["Match Type"].isin(["Exact email match", "Domain match"])]
-
-    matched, total = len(matched_df), len(result_df)
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total files", total)
-    c2.metric("Matched", matched)
-    c3.metric("Unmatched", total - matched)
-
     st.divider()
 
     for _, row in result_df.iterrows():
