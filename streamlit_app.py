@@ -85,20 +85,20 @@ def load_reference(file_bytes: bytes) -> pd.DataFrame:
 
 def match_sender(sender_email: str, ref: pd.DataFrame) -> dict:
     if not sender_email:
-        return {"Distributor": "", "Dist_Acc_No": "", "Region": "", "Match Type": "No sender email found"}
+        return {"Distributor": "", "Dist_Acc_No": "", "Region": "", "Distributor Email": "", "Match Type": "No sender email found"}
 
     exact = ref[ref["Distributor Email"] == sender_email]
     if not exact.empty:
         row = exact.iloc[0]
-        return {"Distributor": row["Distributor"], "Dist_Acc_No": row["Dist_Acc_No"], "Region": row["Region"], "Match Type": "Exact email match"}
+        return {"Distributor": row["Distributor"], "Dist_Acc_No": row["Dist_Acc_No"], "Region": row["Region"], "Distributor Email": row["Distributor Email"], "Match Type": "Exact email match"}
 
     domain = sender_email.split("@")[-1]
     dom_match = ref[ref["Domain"] == domain]
     if not dom_match.empty:
         row = dom_match.iloc[0]
-        return {"Distributor": row["Distributor"], "Dist_Acc_No": row["Dist_Acc_No"], "Region": row["Region"], "Match Type": "Domain match"}
+        return {"Distributor": row["Distributor"], "Dist_Acc_No": row["Dist_Acc_No"], "Region": row["Region"], "Distributor Email": row["Distributor Email"], "Match Type": "Domain match"}
 
-    return {"Distributor": "", "Dist_Acc_No": "", "Region": "", "Match Type": "Unmatched"}
+    return {"Distributor": "", "Dist_Acc_No": "", "Region": "", "Distributor Email": "", "Match Type": "Unmatched"}
 
 
 # --------------------------- session state ---------------------------------
@@ -179,6 +179,7 @@ if st.session_state.results is not None:
         is_matched = row["Match Type"] in ["Exact email match", "Domain match"]
         st.markdown(f"**{row['MSG File']}**")
         st.write(f"Sender email - {row['Sender Email'] or '—'}")
+        st.write(f"Distributor Email - {row['Distributor Email'] if is_matched else '—'}")
         st.write(f"Match Dist - {row['Distributor'] if is_matched else '—'}")
         st.write(f"Match Dist Acc No - {row['Dist_Acc_No'] if is_matched else '—'}")
         if not is_matched:
