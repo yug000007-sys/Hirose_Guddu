@@ -383,12 +383,15 @@ if st.session_state.results:
                             saved_map = st.session_state.mapping_memory.get(mkey, {})
 
                             with st.expander(f"Map columns - {sheet_name}"):
-                                new_map = {}
-                                for col in df.columns:
-                                    new_map[col] = st.text_input(
-                                        col, value=saved_map.get(col, col),
-                                        key=f"map_{f_idx}_{a_idx}_{sheet_name}_{col}",
+                                new_names = []
+                                for i, col in enumerate(df.columns):
+                                    saved_name = saved_map.get(str(i), saved_map.get(col, col))
+                                    new_name = st.text_input(
+                                        f"{col_letter(i)}: {col}", value=saved_name,
+                                        key=f"map_{f_idx}_{a_idx}_{sheet_name}_{i}",
                                     )
+                                    new_names.append(new_name)
+                                new_map = {str(i): name for i, name in enumerate(new_names)}
 
                                 mc1, mc2 = st.columns(2)
                                 with mc1:
@@ -398,7 +401,8 @@ if st.session_state.results:
                                         st.success("Mapping saved.")
 
                                 with mc2:
-                                    mapped_df = df.rename(columns=new_map)
+                                    mapped_df = df.copy()
+                                    mapped_df.columns = new_names
                                     sheet_out = io.BytesIO()
                                     with pd.ExcelWriter(sheet_out, engine="openpyxl") as writer:
                                         mapped_df.to_excel(writer, index=False, sheet_name=sheet_name[:31])
