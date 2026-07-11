@@ -175,7 +175,6 @@ elif msg_files:
 if st.session_state.results is not None:
     result_df = st.session_state.results
     matched_df = result_df[result_df["Match Type"].isin(["Exact email match", "Domain match"])]
-    unmatched_df = result_df[~result_df["Match Type"].isin(["Exact email match", "Domain match"])]
 
     matched, total = len(matched_df), len(result_df)
     c1, c2, c3 = st.columns(3)
@@ -183,21 +182,17 @@ if st.session_state.results is not None:
     c2.metric("Matched", matched)
     c3.metric("Unmatched", total - matched)
 
-    st.subheader("Matched senders")
-    if not matched_df.empty:
-        st.dataframe(
-            matched_df[["MSG File", "Sender Email", "Distributor", "Dist_Acc_No", "Region", "Match Type", "Subject", "Attachments"]],
-            use_container_width=True, hide_index=True,
-        )
-    else:
-        st.info("No files matched a distributor yet.")
+    st.divider()
 
-    if not unmatched_df.empty:
-        st.subheader("Unmatched senders")
-        st.dataframe(
-            unmatched_df[["MSG File", "Sender Email", "Match Type", "Subject"]],
-            use_container_width=True, hide_index=True,
-        )
+    for _, row in result_df.iterrows():
+        is_matched = row["Match Type"] in ["Exact email match", "Domain match"]
+        st.markdown(f"**{row['MSG File']}**")
+        st.write(f"Sender email - {row['Sender Email'] or '—'}")
+        st.write(f"Match Dist - {row['Distributor'] if is_matched else '—'}")
+        st.write(f"Match Dist Acc No - {row['Dist_Acc_No'] if is_matched else '—'}")
+        if not is_matched:
+            st.caption(f"⚠ {row['Match Type']}")
+        st.divider()
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
