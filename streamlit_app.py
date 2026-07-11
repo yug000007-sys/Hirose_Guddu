@@ -193,7 +193,7 @@ if st.session_state.results is not None:
         is_matched = row["Match Type"] in ["Exact email match", "Domain match"]
         label = f"{row['MSG File']}" + (f" — {row['Distributor']}" if is_matched else " — Unmatched")
 
-        with st.expander(label):
+        with st.popover(label, use_container_width=True):
             st.write(f"Sender email - {row['Sender Email'] or '—'}")
             st.write(f"Distributor Email - {row['Distributor Email'] if is_matched else '—'}")
             st.write(f"Match Dist - {row['Distributor'] if is_matched else '—'}")
