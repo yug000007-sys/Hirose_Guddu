@@ -6,23 +6,36 @@ email against a reference sheet (`Distributor`, `Dist_Acc_No`, `Distributor Emai
 ## How it works
 
 1. The reference workbook lives in the repo at `data/reference.xlsx` and
-   loads automatically — no need to upload it every session. (You can
-   still upload a one-off override sheet via the expander if needed.)
+   loads automatically — no need to upload it every session.
 2. Upload one or more `.msg` files.
-3. The app extracts each sender's email and matches it:
-   - **Exact match** against the reference email column (comma-separated
-     multi-email cells are split and each checked individually).
-   - **Domain fallback** (e.g. `@taisei-musen.com.hk`) if no exact match.
-4. Review Matched / Unmatched tables (Distributor + Dist_Acc_No shown for
-   every match) and download the full mapping as Excel.
-5. Hit **Clear All** to wipe the session instantly.
+3. For each file, the sender's email is shown as plain text, and every
+   matching reference row is shown as three dropdowns (Distributor Email /
+   Match Dist / Match Dist Acc No) — even a single match still shows as a
+   dropdown, and multiple candidates (e.g. shared domain) are all listed.
+4. Each attachment shows as a file card (icon, name, type). Click it to
+   open an Excel-style view: row numbers, column letters, and a tab per
+   sheet.
+5. Each sheet has a **Map columns** step — rename or skip columns — with
+   the last-used mapping for that distributor + sheet pre-filled. Save the
+   mapping to reuse it next time, or download just that sheet with the
+   mapped headers applied.
+6. Hit **Clear All** to wipe the session instantly.
 
 ## Privacy
 
-Uploaded `.msg` files and their bytes are processed **entirely in memory**
-(`io.BytesIO`) — nothing is ever written to disk or to a cache file.
-Streamlit's own upload buffer holds the file only for the life of the
-browser session; closing the tab or hitting **Clear All** discards it.
+Uploaded `.msg` files and attachment bytes are processed **entirely in
+memory** (`io.BytesIO`) — never written to disk. The one exception is
+`data/column_mappings.json`, which intentionally persists so column
+mappings are remembered across sessions (see below).
+
+## Column mapping memory
+
+Saved mappings are stored in `data/column_mappings.json`, keyed by
+`distributor::sheet name`. This file persists for the life of the running
+app instance. On Streamlit Cloud, a fresh deploy (new container) resets
+it unless you commit the updated file back to the repo — for now, treat
+it as living memory for the current session/instance, with periodic
+manual backups if you want it permanent across deploys.
 
 ## Updating the reference sheet
 

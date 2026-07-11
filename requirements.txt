@@ -6,3 +6,4 @@ numpy==1.26.4
 pyarrow==14.0.2
 pillow==10.4.0
 protobuf==4.25.3
+pyxlsb==1.0.10

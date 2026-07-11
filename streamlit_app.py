@@ -1,15 +1,19 @@
 """
-MSG -> Distributor Mapper (v2)
+MSG -> Distributor Mapper (v3)
 --------------------------------
-- Reference workbook is bundled in the repo (data/reference.xlsx) so you
-  don't need to re-upload it every time. You can still override it for a
-  one-off run with a different sheet.
-- .msg files are processed entirely in memory (io.BytesIO). Nothing is
-  written to disk or cache at any point.
-- "Clear All" button wipes the in-memory session state immediately.
+- Reference workbook bundled in repo (data/reference.xlsx), no re-upload needed.
+- .msg files processed entirely in memory. Nothing written to disk except the
+  column-mapping memory file (data/column_mappings.json), which is meant to persist.
+- Match results shown as three independent dropdowns (Distributor Email,
+  Match Dist, Match Dist Acc No), always dropdowns even with a single option.
+- Attachments shown as file cards (icon + name + type). Clicking opens an
+  Excel-style sheet view (row numbers, column letters, sheet tabs).
+- Each sheet has a column-mapping step (rename/skip columns), remembered per
+  distributor + sheet name, with a "download this sheet only" export.
 """
 
 import io
+import json
 import re
 from pathlib import Path
 
@@ -22,6 +26,7 @@ st.set_page_config(page_title="MSG -> Distributor Mapper", layout="wide")
 
 EMAIL_RE = re.compile(r"[\w\.\-\+]+@[\w\-]+\.[\w\.\-]+")
 BUNDLED_REFERENCE_PATH = Path(__file__).parent / "data" / "reference.xlsx"
+MAPPING_MEMORY_PATH = Path(__file__).parent / "data" / "column_mappings.json"
 
 MIME_TYPES = {
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -30,18 +35,27 @@ MIME_TYPES = {
     ".csv": "text/csv",
 }
 
+EXCEL_ICON_COLORS = {".xlsx": "#1D6F42", ".xls": "#1D6F42", ".xlsb": "#1D6F42", ".csv": "#217346"}
+
 
 def guess_mime(filename: str) -> str:
     ext = Path(filename).suffix.lower()
     return MIME_TYPES.get(ext, "application/octet-stream")
 
 
-# ----------------------------- helpers -----------------------------------
+def col_letter(n: int) -> str:
+    """0-indexed column number -> Excel-style letter (A, B, ..., Z, AA, ...)."""
+    letters = ""
+    n += 1
+    while n > 0:
+        n, rem = divmod(n - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
+
+
+# ----------------------------- reference matching -----------------------------
 
 def extract_sender_email(file_bytes: bytes) -> tuple[str, str, str, list[tuple[str, bytes]]]:
-    """Return (display_sender, clean_email, subject, attachments) from
-    in-memory .msg bytes. Nothing touches disk. attachments is a list of
-    (filename, file_bytes) tuples."""
     bio = io.BytesIO(file_bytes)
     msg = extract_msg.Message(bio)
     raw_sender = msg.sender or ""
@@ -55,8 +69,6 @@ def extract_sender_email(file_bytes: bytes) -> tuple[str, str, str, list[tuple[s
 
 @st.cache_data(show_spinner=False)
 def load_reference(file_bytes: bytes) -> pd.DataFrame:
-    """Load every sheet of the reference workbook, normalize columns,
-    and explode multi-email cells into one row per email."""
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
     frames = []
 
@@ -96,22 +108,67 @@ def load_reference(file_bytes: bytes) -> pd.DataFrame:
     return ref.reset_index(drop=True)
 
 
-def match_sender(sender_email: str, ref: pd.DataFrame) -> dict:
+def get_candidates(sender_email: str, ref: pd.DataFrame) -> list[dict]:
+    """Return every matching reference row (exact matches first, then domain
+    matches), each as a dict. Empty list if nothing matches."""
     if not sender_email:
-        return {"Distributor": "", "Dist_Acc_No": "", "Region": "", "Distributor Email": "", "Match Type": "No sender email found"}
+        return []
 
     exact = ref[ref["Distributor Email"] == sender_email]
-    if not exact.empty:
-        row = exact.iloc[0]
-        return {"Distributor": row["Distributor"], "Dist_Acc_No": row["Dist_Acc_No"], "Region": row["Region"], "Distributor Email": row["Distributor Email"], "Match Type": "Exact email match"}
-
     domain = sender_email.split("@")[-1]
-    dom_match = ref[ref["Domain"] == domain]
-    if not dom_match.empty:
-        row = dom_match.iloc[0]
-        return {"Distributor": row["Distributor"], "Dist_Acc_No": row["Dist_Acc_No"], "Region": row["Region"], "Distributor Email": row["Distributor Email"], "Match Type": "Domain match"}
+    dom_match = ref[(ref["Domain"] == domain) & (ref["Distributor Email"] != sender_email)]
 
-    return {"Distributor": "", "Dist_Acc_No": "", "Region": "", "Distributor Email": "", "Match Type": "Unmatched"}
+    candidates = []
+    for _, row in exact.iterrows():
+        candidates.append({
+            "Distributor": row["Distributor"], "Dist_Acc_No": row["Dist_Acc_No"],
+            "Region": row["Region"], "Distributor Email": row["Distributor Email"],
+            "Match Type": "Exact email match",
+        })
+    for _, row in dom_match.iterrows():
+        candidates.append({
+            "Distributor": row["Distributor"], "Dist_Acc_No": row["Dist_Acc_No"],
+            "Region": row["Region"], "Distributor Email": row["Distributor Email"],
+            "Match Type": "Domain match",
+        })
+    return candidates
+
+
+# ----------------------------- sheet reading -----------------------------
+
+def read_all_sheets(filename: str, file_bytes: bytes) -> dict[str, pd.DataFrame] | None:
+    ext = Path(filename).suffix.lower()
+    bio = io.BytesIO(file_bytes)
+    try:
+        if ext == ".csv":
+            return {"Sheet1": pd.read_csv(bio, dtype=str)}
+        elif ext == ".xlsb":
+            return pd.read_excel(bio, sheet_name=None, engine="pyxlsb", dtype=str)
+        elif ext in (".xlsx", ".xls"):
+            return pd.read_excel(bio, sheet_name=None, dtype=str)
+    except Exception:
+        return None
+    return None
+
+
+# ----------------------------- mapping memory -----------------------------
+
+def load_mapping_memory() -> dict:
+    if MAPPING_MEMORY_PATH.exists():
+        try:
+            return json.loads(MAPPING_MEMORY_PATH.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def save_mapping_memory(memory: dict):
+    MAPPING_MEMORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    MAPPING_MEMORY_PATH.write_text(json.dumps(memory, indent=2, ensure_ascii=False))
+
+
+def mapping_key(distributor: str, sheet_name: str) -> str:
+    return f"{distributor or 'Unknown'}::{sheet_name}"
 
 
 # --------------------------- session state ---------------------------------
@@ -120,18 +177,23 @@ if "results" not in st.session_state:
     st.session_state.results = None
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
+if "expanded_attachment" not in st.session_state:
+    st.session_state.expanded_attachment = None
+if "mapping_memory" not in st.session_state:
+    st.session_state.mapping_memory = load_mapping_memory()
 
 
 def clear_all():
     st.session_state.results = None
-    st.session_state.uploader_key += 1  # forces file_uploader widgets to reset
+    st.session_state.expanded_attachment = None
+    st.session_state.uploader_key += 1
 
 
 # ------------------------------- UI ---------------------------------------
 
 st.title("MSG -> Distributor Mapper")
-st.caption("Reference sheet is preloaded from the repo. Upload .msg files to match senders to distributors. "
-           "Nothing is written to disk or cache — everything stays in memory for this session only.")
+st.caption("Upload .msg files to match senders to distributors, preview attachments, and map/export sheet columns. "
+           "Msg files stay in memory only; nothing is written to disk except saved column mappings.")
 
 top_l, top_r = st.columns([4, 1])
 with top_r:
@@ -145,13 +207,10 @@ with st.expander("Reference sheet options (using bundled sheet by default)"):
 
 if override_ref is not None:
     ref_bytes = override_ref.getvalue()
-    ref_source_label = f"Uploaded override: {override_ref.name}"
 elif BUNDLED_REFERENCE_PATH.exists():
     ref_bytes = BUNDLED_REFERENCE_PATH.read_bytes()
-    ref_source_label = "Bundled reference sheet (data/reference.xlsx)"
 else:
     ref_bytes = None
-    ref_source_label = None
 
 msg_files = st.file_uploader(
     "MSG files (multiple allowed)", type=["msg"], accept_multiple_files=True,
@@ -169,66 +228,148 @@ elif msg_files:
         results = []
         with st.spinner("Processing .msg files (in memory, nothing saved to disk)..."):
             for uploaded in msg_files:
-                file_bytes = uploaded.getvalue()  # stays in RAM only
+                file_bytes = uploaded.getvalue()
                 raw_sender, sender_email, subject, attachments = extract_sender_email(file_bytes)
-                match = match_sender(sender_email, ref_df)
+                candidates = get_candidates(sender_email, ref_df)
 
                 results.append({
                     "MSG File": uploaded.name,
                     "Subject": subject,
                     "Sender": raw_sender,
                     "Sender Email": sender_email,
-                    "Attachments": ", ".join(name for name, _ in attachments),
+                    "Candidates": candidates,
                     "Attachments Data": attachments,
-                    **match,
                 })
 
-        st.session_state.results = pd.DataFrame(results)
+        st.session_state.results = results
 
-if st.session_state.results is not None:
-    result_df = st.session_state.results
+if st.session_state.results:
     st.divider()
 
-    for idx, row in result_df.iterrows():
-        is_matched = row["Match Type"] in ["Exact email match", "Domain match"]
-        label = f"{row['MSG File']}" + (f" — {row['Distributor']}" if is_matched else " — Unmatched")
+    for f_idx, item in enumerate(st.session_state.results):
+        st.markdown(f"**{item['MSG File']}**")
+        st.write(f"Sender email - {item['Sender Email'] or '\u2014'}")
 
-        with st.popover(label, use_container_width=True):
-            st.write(
-                f"Sender email - {row['Sender Email'] or '—'}  |  "
-                f"Distributor Email - {row['Distributor Email'] if is_matched else '—'}  |  "
-                f"Match Dist - {row['Distributor'] if is_matched else '—'}  |  "
-                f"Match Dist Acc No - {row['Dist_Acc_No'] if is_matched else '—'}"
-            )
-            if not is_matched:
-                st.caption(f"⚠ {row['Match Type']}")
+        candidates = item["Candidates"]
+        if candidates:
+            c1, c2, c3 = st.columns(3)
+            emails = [c["Distributor Email"] for c in candidates]
+            dists = [c["Distributor"] for c in candidates]
+            accs = [c["Dist_Acc_No"] for c in candidates]
+            with c1:
+                st.selectbox("Distributor Email", emails, key=f"email_dd_{f_idx}")
+            with c2:
+                st.selectbox("Match Dist", dists, key=f"dist_dd_{f_idx}")
+            with c3:
+                st.selectbox("Match Dist Acc No", accs, key=f"acc_dd_{f_idx}")
+            selected_distributor = dists[0]
+        else:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.selectbox("Distributor Email", ["No match found"], key=f"email_dd_{f_idx}", disabled=True)
+            with c2:
+                st.selectbox("Match Dist", ["No match found"], key=f"dist_dd_{f_idx}", disabled=True)
+            with c3:
+                st.selectbox("Match Dist Acc No", ["No match found"], key=f"acc_dd_{f_idx}", disabled=True)
+            selected_distributor = "Unknown"
 
-            attachments = row["Attachments Data"]
-            if attachments:
-                st.write("Attachments:")
-                cols = st.columns(len(attachments))
-                for i, (att_name, att_bytes) in enumerate(attachments):
-                    with cols[i]:
-                        st.download_button(
-                            f"⬇ {att_name}",
-                            data=att_bytes,
-                            file_name=att_name,
-                            mime=guess_mime(att_name),
-                            key=f"att_{idx}_{i}",
-                        )
-            else:
-                st.caption("No attachments found.")
+        attachments = item["Attachments Data"]
+        if attachments:
+            att_cols = st.columns(min(len(attachments), 4))
+            for a_idx, (att_name, att_bytes) in enumerate(attachments):
+                ext = Path(att_name).suffix.lower()
+                card_key = f"card_{f_idx}_{a_idx}"
+                with att_cols[a_idx % len(att_cols)]:
+                    clicked = st.button(
+                        f"\U0001F4C4 {att_name}\n{ext.lstrip('.').upper()} File",
+                        key=card_key, use_container_width=True,
+                    )
+                    if clicked:
+                        current = st.session_state.expanded_attachment
+                        target = (f_idx, a_idx)
+                        st.session_state.expanded_attachment = None if current == target else target
 
+            if st.session_state.expanded_attachment and st.session_state.expanded_attachment[0] == f_idx:
+                _, a_idx = st.session_state.expanded_attachment
+                att_name, att_bytes = attachments[a_idx]
+                sheets = read_all_sheets(att_name, att_bytes)
+
+                if sheets is None:
+                    st.warning(f"Could not read {att_name} as a spreadsheet.")
+                else:
+                    sheet_names = list(sheets.keys())
+                    tabs = st.tabs(sheet_names)
+
+                    for tab, sheet_name in zip(tabs, sheet_names):
+                        with tab:
+                            df = sheets[sheet_name]
+                            display_df = df.copy()
+                            display_df.columns = [f"{col_letter(i)}: {c}" for i, c in enumerate(df.columns)]
+                            display_df.index = range(2, 2 + len(display_df))
+                            st.dataframe(display_df, use_container_width=True, height=280)
+
+                            mkey = mapping_key(selected_distributor, sheet_name)
+                            saved_map = st.session_state.mapping_memory.get(mkey, {})
+
+                            with st.expander(f"Map columns - {sheet_name}"):
+                                new_map = {}
+                                for col in df.columns:
+                                    new_map[col] = st.text_input(
+                                        col, value=saved_map.get(col, col),
+                                        key=f"map_{f_idx}_{a_idx}_{sheet_name}_{col}",
+                                    )
+
+                                mc1, mc2 = st.columns(2)
+                                with mc1:
+                                    if st.button(f"Save mapping for {selected_distributor}", key=f"save_map_{f_idx}_{a_idx}_{sheet_name}"):
+                                        st.session_state.mapping_memory[mkey] = new_map
+                                        save_mapping_memory(st.session_state.mapping_memory)
+                                        st.success("Mapping saved.")
+
+                                with mc2:
+                                    mapped_df = df.rename(columns=new_map)
+                                    sheet_out = io.BytesIO()
+                                    with pd.ExcelWriter(sheet_out, engine="openpyxl") as writer:
+                                        mapped_df.to_excel(writer, index=False, sheet_name=sheet_name[:31])
+                                    sheet_out.seek(0)
+                                    st.download_button(
+                                        "Download this sheet",
+                                        data=sheet_out,
+                                        file_name=f"{Path(att_name).stem}_{sheet_name}_mapped.xlsx",
+                                        mime=MIME_TYPES[".xlsx"],
+                                        key=f"dl_sheet_{f_idx}_{a_idx}_{sheet_name}",
+                                    )
+
+                    st.download_button(
+                        f"Download original {att_name}",
+                        data=att_bytes, file_name=att_name, mime=guess_mime(att_name),
+                        key=f"dl_orig_{f_idx}_{a_idx}",
+                    )
+        else:
+            st.caption("No attachments found.")
+
+        st.divider()
+
+    # full mapping export (sender/match summary only, no attachment bytes)
+    export_rows = []
+    for f_idx, item in enumerate(st.session_state.results):
+        candidates = item["Candidates"]
+        best = candidates[0] if candidates else {"Distributor": "", "Dist_Acc_No": "", "Region": "", "Distributor Email": "", "Match Type": "Unmatched"}
+        export_rows.append({
+            "MSG File": item["MSG File"], "Sender Email": item["Sender Email"],
+            "Attachments": ", ".join(n for n, _ in item["Attachments Data"]),
+            **best,
+        })
+    export_df = pd.DataFrame(export_rows)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        result_df.drop(columns=["Attachments Data"]).to_excel(writer, index=False, sheet_name="Mapping")
+        export_df.to_excel(writer, index=False, sheet_name="Mapping")
     output.seek(0)
 
     st.download_button(
-        "Download mapping as Excel",
-        data=output,
-        file_name="msg_distributor_mapping.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Download full mapping summary as Excel",
+        data=output, file_name="msg_distributor_mapping.xlsx",
+        mime=MIME_TYPES[".xlsx"],
     )
 else:
     st.info("Upload .msg files to see match results.")
