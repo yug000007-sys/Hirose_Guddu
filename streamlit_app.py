@@ -192,6 +192,35 @@ def apply_header_row(raw: pd.DataFrame, header_row: int) -> pd.DataFrame:
     df = raw.iloc[header_row + 1:].copy()
     df.columns = headers
     df = df.reset_index(drop=True)
+    df = clean_numeric_strings(df)
+    return df
+
+
+def clean_numeric_strings(df: pd.DataFrame) -> pd.DataFrame:
+    """Cells were read as strings, so numbers like 84480*5.86 come back as
+    '495052.80000000005' (binary float noise). Round any numeric-looking
+    cell to 9 decimals to strip that noise while keeping real precision
+    (e.g. a genuine 4-decimal unit cost stays untouched)."""
+    df = df.copy()
+    for col in df.columns:
+        series = df[col]
+
+        def _clean(v):
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return v
+            s = str(v).strip()
+            if s == "":
+                return v
+            try:
+                f = float(s)
+            except (ValueError, TypeError):
+                return v
+            r = round(f, 9)
+            if r == int(r):
+                return str(int(r))
+            return str(r)
+
+        df[col] = series.map(_clean)
     return df
 
 
