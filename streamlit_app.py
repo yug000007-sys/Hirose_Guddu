@@ -55,7 +55,7 @@ def col_letter(n: int) -> str:
 
 # ----------------------------- reference matching -----------------------------
 
-def extract_sender_email(file_bytes: bytes) -> tuple[str, str, str, list[tuple[str, bytes]]]:
+def extract_sender_email(file_bytes: bytes) -> tuple[str, str, str, list[tuple[str, bytes]], object]:
     bio = io.BytesIO(file_bytes)
     msg = extract_msg.Message(bio)
     raw_sender = msg.sender or ""
@@ -63,8 +63,9 @@ def extract_sender_email(file_bytes: bytes) -> tuple[str, str, str, list[tuple[s
     clean_email = match.group(0).lower().strip() if match else ""
     subject = msg.subject or ""
     attachments = [(a.longFilename, a.data) for a in msg.attachments if a.longFilename and a.data]
+    received_date = msg.date.date() if msg.date else None
     msg.close()
-    return raw_sender, clean_email, subject, attachments
+    return raw_sender, clean_email, subject, attachments, received_date
 
 
 @st.cache_data(show_spinner=False)
@@ -302,7 +303,7 @@ elif msg_files:
         with st.spinner("Processing .msg files (in memory, nothing saved to disk)..."):
             for uploaded in msg_files:
                 file_bytes = uploaded.getvalue()
-                raw_sender, sender_email, subject, attachments = extract_sender_email(file_bytes)
+                raw_sender, sender_email, subject, attachments, received_date = extract_sender_email(file_bytes)
                 candidates = get_candidates(sender_email, ref_df)
 
                 results.append({
@@ -312,6 +313,7 @@ elif msg_files:
                     "Sender Email": sender_email,
                     "Candidates": candidates,
                     "Attachments Data": attachments,
+                    "Invoice Date": received_date.strftime("%m/%d/%Y") if received_date else "",
                 })
 
         st.session_state.results = results
@@ -322,6 +324,12 @@ if st.session_state.results:
     for f_idx, item in enumerate(st.session_state.results):
         st.markdown(f"**{item['MSG File']}**")
         st.write(f"Sender email - {item['Sender Email'] or '\u2014'}")
+
+        inv_key = f"invoice_date_{f_idx}"
+        st.text_input(
+            "Invoice Date (MM/DD/YYYY)", value=item.get("Invoice Date", ""),
+            key=inv_key, help="Defaults to the date this email was received. Edit directly if it needs to be different.",
+        )
 
         candidates = item["Candidates"]
         if candidates:
@@ -461,6 +469,7 @@ if st.session_state.results:
         best = candidates[0] if candidates else {"Distributor": "", "Dist_Acc_No": "", "Region": "", "Distributor Email": "", "Match Type": "Unmatched"}
         export_rows.append({
             "MSG File": item["MSG File"], "Sender Email": item["Sender Email"],
+            "Invoice Date": st.session_state.get(f"invoice_date_{f_idx}", item.get("Invoice Date", "")),
             "Attachments": ", ".join(n for n, _ in item["Attachments Data"]),
             **best,
         })
